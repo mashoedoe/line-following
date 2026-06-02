@@ -254,8 +254,15 @@ const tiles220 = [
   <div class="io-sep"></div>
   <label class="roll-lbl" for="roll-w">Printer roll width&nbsp;(mm):</label>
   <input id="roll-w" class="io-inp" type="number" min="1" value="1143" style="width:72px;text-align:right" title="Width of your print roll or sheet in mm" oninput="this._userEdited=true">
-  <label class="roll-lbl" for="border-mm">White border&nbsp;(mm):</label>
-  <input id="border-mm" class="io-inp" type="number" min="0" value="0" style="width:72px;text-align:right" title="Extra white margin added around the chosen output" oninput="this._userEdited=true">
+  <label class="roll-lbl" for="border-sides-mm">Border sides&nbsp;(mm):</label>
+  <input id="border-sides-mm" class="io-inp" type="number" min="0" value="0" style="width:72px;text-align:right" title="Extra white margin added to left and right sides" oninput="this._userEdited=true">
+  <label class="roll-lbl" for="border-tb-mm" style="margin-left:6px">Top/bottom&nbsp;(mm):</label>
+  <input id="border-tb-mm" class="io-inp" type="number" min="0" value="0" style="width:72px;text-align:right" title="Extra white margin added to top and bottom" oninput="this._userEdited=true">
+  <div class="io-sep"></div>
+  <label style="font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap" title="Trim fully empty edge rows/cols before printing">
+    <input id="crop-content-chk" type="checkbox" style="cursor:pointer">
+    Crop to content
+  </label>
   <div class="io-sep"></div>
   <label style="font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap" title="Draw a thin red border around every tile in PDF/PNG output for scoring clarity">
     <input id="tile-border-chk" type="checkbox" style="cursor:pointer">
@@ -775,19 +782,43 @@ function buildSeq(seqId, tableId, state, rotState, flipState, cols, rows, tileAr
 // ─── PDF filename helper ────────────────────────────────────────────────────────
 function pdfName(suffix) {
   const roll = document.getElementById('roll-w').value || '';
-  const border = getWhiteBorderMm();
+  const bSide = getWhiteBorderSideMm();
+  const bTB   = getWhiteBorderTBMm();
   const rollPart = roll ? roll + 'mm' : '';
-  const borderPart = border > 0 ? sanitizeMmForName(border) + 'mmBorder' : '';
+  const borderPart = (bSide > 0 || bTB > 0)
+    ? sanitizeMmForName(bSide) + 'x' + sanitizeMmForName(bTB) + 'mmBorder'
+    : '';
   const prefix = _loadedJsonName ? _loadedJsonName + '_' : '';
   const parts = [rollPart, suffix, borderPart].filter(Boolean);
   return prefix + parts.join('_') + '.pdf';
 }
 
-function getWhiteBorderMm() {
-  return Math.max(0, parseFloat(document.getElementById('border-mm')?.value) || 0);
+function getWhiteBorderSideMm() {
+  return Math.max(0, parseFloat(document.getElementById('border-sides-mm')?.value) || 0);
+}
+function getWhiteBorderTBMm() {
+  return Math.max(0, parseFloat(document.getElementById('border-tb-mm')?.value) || 0);
 }
 function tileBorderEnabled() {
   return document.getElementById('tile-border-chk')?.checked || false;
+}
+
+function cropEnabled() {
+  return document.getElementById('crop-content-chk')?.checked || false;
+}
+
+// Returns {minCol,maxCol,minRow,maxRow} bounding box of non-null tiles, or null.
+function computeCrop(stateArr, cols, rows) {
+  let minC=cols, maxC=-1, minR=rows, maxR=-1;
+  for (let r=0;r<rows;r++) for (let c=0;c<cols;c++) {
+    const v=stateArr[r*cols+c];
+    if (v!==null && v!==undefined) {
+      if(c<minC)minC=c; if(c>maxC)maxC=c;
+      if(r<minR)minR=r; if(r>maxR)maxR=r;
+    }
+  }
+  if(maxC===-1)return null;
+  return{minCol:minC,maxCol:maxC,minRow:minR,maxRow:maxR};
 }
 
 function sanitizeMmForName(mm) {
@@ -831,14 +862,22 @@ async function generateLayout220PDF(mode) {
     const { PDFDocument } = PDFLib;
     const MM_TO_PT = 2.83465;
     const TILE_PT  = 220 * MM_TO_PT;
-    const BORDER_MM = getWhiteBorderMm();
-    const BORDER_PT = BORDER_MM * MM_TO_PT;
+    const BORDER_SIDE_MM = getWhiteBorderSideMm();
+    const BORDER_TB_MM   = getWhiteBorderTBMm();
+    const BORDER_SIDE_PT = BORDER_SIDE_MM * MM_TO_PT;
+    const BORDER_TB_PT   = BORDER_TB_MM   * MM_TO_PT;
     const COLS = 5, ROWS = 10;
     const PAGE_W = COLS * TILE_PT;   // 1100 mm
     const PAGE_H = ROWS * TILE_PT;   // 2200 mm
 
     const outDoc  = await PDFDocument.create();
     outDoc.setTitle('Line Follower 220mm Layout');
+    // ── Crop to content (output stage only) ──────────────────────────
+    const _crop = cropEnabled() ? computeCrop(state220, 5, 10) : null;
+    const cropMinCol = _crop ? _crop.minCol : 0;
+    const cropMinRow = _crop ? _crop.minRow : 0;
+    const cropCols   = _crop ? (_crop.maxCol - _crop.minCol + 1) : 5;
+    const cropRows   = _crop ? (_crop.maxRow - _crop.minRow + 1) : 10;
     const outPage = outDoc.addPage([PAGE_W, PAGE_H]);
 
     async function tileToPNG(dataUri, cwDeg, fl) {
@@ -966,21 +1005,22 @@ async function generateLayout220PDF(mode) {
     const raw  = (document.getElementById('io-name').value.trim() || 'linefollower-layout').replace(/[^a-zA-Z0-9_-]/g, '_');
     if (mode === 'full') {
       const rPT220 = (parseFloat(document.getElementById('roll-w').value)||1143)*2.83465;
-      const outW = Math.max(rPT220, PAGE_W + BORDER_PT * 2);
-      const outH = PAGE_H + BORDER_PT * 2;
-      if (Math.abs(outW-PAGE_W)<2 && BORDER_PT===0) { await downloadPdf(pdfBytes, pdfName('220mm_full')); }
+      const outW = cropCols*TILE_PT + BORDER_SIDE_PT * 2;
+      const outH = cropRows*TILE_PT + BORDER_TB_PT * 2;
+      if (Math.abs(outW-PAGE_W)<2 && BORDER_SIDE_PT===0 && BORDER_TB_PT===0) { await downloadPdf(pdfBytes, pdfName('220mm_full')); }
       else {
         const {PDFDocument:D2}=PDFLib, fd=await D2.create(), sd=await D2.load(pdfBytes);
         const [ed]=await fd.embedPdf(sd,[0]), fp=fd.addPage([outW,outH]);
-        fp.drawPage(ed,{x:(outW-PAGE_W)/2,y:BORDER_PT,width:PAGE_W,height:PAGE_H});
+        fp.drawPage(ed,{x:BORDER_SIDE_PT-cropMinCol*TILE_PT,y:BORDER_TB_PT-(10-cropMinRow-cropRows)*TILE_PT,width:PAGE_W,height:PAGE_H});
         await downloadPdf(await fd.save(), pdfName('220mm_full'));
       }
     } else if (mode === 'png') {
       const matCanvas = document.createElement('canvas');
       const cellPx = 1092;
-      const borderPx = getBorderPx(BORDER_MM, cellPx, 220);
-      matCanvas.width  = COLS * cellPx + borderPx * 2;
-      matCanvas.height = ROWS * cellPx + borderPx * 2;
+      const borderSidePx = getBorderPx(BORDER_SIDE_MM, cellPx, 220);
+      const borderTBPx   = getBorderPx(BORDER_TB_MM,   cellPx, 220);
+      matCanvas.width  = COLS * cellPx + borderSidePx * 2;
+      matCanvas.height = ROWS * cellPx + borderTBPx   * 2;
       const matCtx = matCanvas.getContext('2d');
       matCtx.fillStyle = '#ffffff';
       matCtx.fillRect(0, 0, matCanvas.width, matCanvas.height);
@@ -998,7 +1038,7 @@ async function generateLayout220PDF(mode) {
           const img = new Image();
           img.onload = () => {
             matCtx.save();
-            matCtx.translate(borderPx + col * cellPx + cellPx/2, borderPx + row * cellPx + cellPx/2);
+            matCtx.translate(borderSidePx + col * cellPx + cellPx/2, borderTBPx + row * cellPx + cellPx/2);
             matCtx.rotate(cwDeg * Math.PI / 180);
             if (fl) matCtx.scale(-1, 1);
             matCtx.drawImage(img, -cellPx/2, -cellPx/2, cellPx, cellPx);
@@ -1006,7 +1046,7 @@ async function generateLayout220PDF(mode) {
             if (tileBorderEnabled()) {
               matCtx.strokeStyle = '#ff0000';
               matCtx.lineWidth = 2;
-              matCtx.strokeRect(borderPx + col * cellPx, borderPx + row * cellPx, cellPx, cellPx);
+              matCtx.strokeRect(borderSidePx + col * cellPx, borderTBPx + row * cellPx, cellPx, cellPx);
             }
             resolve();
           };
@@ -1015,7 +1055,16 @@ async function generateLayout220PDF(mode) {
         });
       }
       btn.textContent = 'Saving PNG\u2026';
-      await downloadPng(matCanvas, pdfName('220mm_full').replace('.pdf', '.png'));
+      const _oc_220mm = (cropEnabled() && _crop) ? (()=>{
+        const oc=document.createElement('canvas');
+        oc.width =cropCols*cellPx+borderSidePx*2;
+        oc.height=cropRows*cellPx+borderTBPx*2;
+        const ox=oc.getContext('2d');
+        ox.fillStyle='#ffffff';ox.fillRect(0,0,oc.width,oc.height);
+        ox.drawImage(matCanvas,cropMinCol*cellPx,cropMinRow*cellPx,cropCols*cellPx,cropRows*cellPx,borderSidePx,borderTBPx,cropCols*cellPx,cropRows*cellPx);
+        return oc;
+      })():matCanvas;
+      await downloadPng(_oc_220mm, pdfName('220mm_full').replace('.pdf', '.png'));
     } else if (mode === 'left' || mode === 'right') {
       const { PDFDocument: PDFDoc2 } = PDFLib;
       const halfDoc  = await PDFDoc2.create();
@@ -1024,27 +1073,27 @@ async function generateLayout220PDF(mode) {
       const ROLL_PT  = (parseFloat(document.getElementById('roll-w').value) || 1100) * 2.83465;
       const halfMatW = PAGE_W / 2;
       const outW = ROLL_PT;
-      const outH = PAGE_H + BORDER_PT * 2;
+      const outH = PAGE_H + BORDER_TB_PT * 2;
       const halfPage = halfDoc.addPage([outW, outH]);
       if (mode === 'left') {
-        halfPage.drawPage(emb, { x: outW - halfMatW, y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        halfPage.drawPage(emb, { x: outW - halfMatW, y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await halfDoc.save(), pdfName('220mm_left'));
       } else {
-        halfPage.drawPage(emb, { x: -halfMatW, y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        halfPage.drawPage(emb, { x: -halfMatW, y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await halfDoc.save(), pdfName('220mm_right'));
       }
     } else if (mode === 'strips') {
       const { PDFDocument: PDFDoc2 } = PDFLib;
       const ROLL_PT   = (parseFloat(document.getElementById('roll-w').value) || 1100) * 2.83465;
-      const totalW = PAGE_W + BORDER_PT * 2;
+      const totalW = PAGE_W + BORDER_SIDE_PT * 2;
       const numStrips = Math.ceil(totalW / ROLL_PT);
       for (let i = 0; i < numStrips; i++) {
         btn.textContent = `Saving strip ${i + 1} of ${numStrips}\u2026`;
         const stripDoc  = await PDFDoc2.create();
         const srcDoc2   = await PDFDoc2.load(pdfBytes);
         const [emb2]    = await stripDoc.embedPdf(srcDoc2, [0]);
-        const stripPage = stripDoc.addPage([ROLL_PT, PAGE_H + BORDER_PT * 2]);
-        stripPage.drawPage(emb2, { x: BORDER_PT - (i * ROLL_PT), y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        const stripPage = stripDoc.addPage([ROLL_PT, PAGE_H + BORDER_TB_PT * 2]);
+        stripPage.drawPage(emb2, { x: BORDER_SIDE_PT - (i * ROLL_PT), y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await stripDoc.save(), pdfName(`220mm_strip${i + 1}of${numStrips}`));
       }
     } else {
@@ -1060,10 +1109,10 @@ async function generateLayout220PDF(mode) {
       const [emb2]  = await outDoc2.embedPdf(srcDoc2, [0]);
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
-          const pg = outDoc2.addPage([pgW + BORDER_PT * 2, pgH + BORDER_PT * 2]);
+          const pg = outDoc2.addPage([pgW + BORDER_SIDE_PT * 2, pgH + BORDER_TB_PT * 2]);
           pg.drawPage(emb2, {
-            x: BORDER_PT - (col * pgW),
-            y: BORDER_PT - (PAGE_H - pgH) + (row * pgH),
+            x: BORDER_SIDE_PT - (col * pgW),
+            y: BORDER_TB_PT - (PAGE_H - pgH) + (row * pgH),
             width: PAGE_W, height: PAGE_H,
           });
         }
@@ -1099,13 +1148,21 @@ async function generateLayoutHybridPDF(mode) {
     const { PDFDocument } = PDFLib;
     const MM_TO_PT = 2.83465;
     const TILE_PT  = (1170 / 4) * MM_TO_PT;
-    const BORDER_MM = getWhiteBorderMm();
-    const BORDER_PT = BORDER_MM * MM_TO_PT;
+    const BORDER_SIDE_MM = getWhiteBorderSideMm();
+    const BORDER_TB_MM   = getWhiteBorderTBMm();
+    const BORDER_SIDE_PT = BORDER_SIDE_MM * MM_TO_PT;
+    const BORDER_TB_PT   = BORDER_TB_MM   * MM_TO_PT;
     const COLS = 4, ROWS = 8;
     const PAGE_W = COLS * TILE_PT;
     const PAGE_H = ROWS * TILE_PT;
     const outDoc  = await PDFDocument.create();
     outDoc.setTitle('Line Follower 292mm Layout');
+    // ── Crop to content (output stage only) ──────────────────────────
+    const _crop = cropEnabled() ? computeCrop(state292, 4, 8) : null;
+    const cropMinCol = _crop ? _crop.minCol : 0;
+    const cropMinRow = _crop ? _crop.minRow : 0;
+    const cropCols   = _crop ? (_crop.maxCol - _crop.minCol + 1) : 4;
+    const cropRows   = _crop ? (_crop.maxRow - _crop.minRow + 1) : 8;
     const outPage = outDoc.addPage([PAGE_W, PAGE_H]);
     async function tileToPNG(dataUri, cwDeg, fl) {
       return new Promise((resolve, reject) => {
@@ -1178,21 +1235,22 @@ async function generateLayoutHybridPDF(mode) {
     const prefix=_loadedJsonName?_loadedJsonName+'_':'';
     if (mode==='full') {
       const rPT=(parseFloat(document.getElementById('roll-w').value)||1143)*2.83465;
-      const outW = Math.max(rPT, PAGE_W + BORDER_PT * 2);
-      const outH = PAGE_H + BORDER_PT * 2;
-      if (Math.abs(outW-PAGE_W)<2 && BORDER_PT===0) { await downloadPdf(pdfBytes,pdfName('292mm_full')); }
+      const outW = cropCols*TILE_PT + BORDER_SIDE_PT * 2;
+      const outH = cropRows*TILE_PT + BORDER_TB_PT * 2;
+      if (Math.abs(outW-PAGE_W)<2 && BORDER_SIDE_PT===0 && BORDER_TB_PT===0) { await downloadPdf(pdfBytes,pdfName('292mm_full')); }
       else {
         const {PDFDocument:D2}=PDFLib,fd=await D2.create(),sd=await D2.load(pdfBytes);
         const [ed]=await fd.embedPdf(sd,[0]),fp=fd.addPage([outW,outH]);
-        fp.drawPage(ed,{x:(outW-PAGE_W)/2,y:BORDER_PT,width:PAGE_W,height:PAGE_H});
+        fp.drawPage(ed,{x:BORDER_SIDE_PT-cropMinCol*TILE_PT,y:BORDER_TB_PT-(8-cropMinRow-cropRows)*TILE_PT,width:PAGE_W,height:PAGE_H});
         await downloadPdf(await fd.save(),pdfName('292mm_full'));
       }
     } else if (mode === 'png') {
       const matCanvas = document.createElement('canvas');
       const cellPx = 1092;
-      const borderPx = getBorderPx(BORDER_MM, cellPx, 292.5);
-      matCanvas.width  = COLS * cellPx + borderPx * 2;
-      matCanvas.height = ROWS * cellPx + borderPx * 2;
+      const borderSidePx = getBorderPx(BORDER_SIDE_MM, cellPx, 292.5);
+      const borderTBPx   = getBorderPx(BORDER_TB_MM,   cellPx, 292.5);
+      matCanvas.width  = COLS * cellPx + borderSidePx * 2;
+      matCanvas.height = ROWS * cellPx + borderTBPx   * 2;
       const matCtx = matCanvas.getContext('2d');
       matCtx.fillStyle = '#ffffff';
       matCtx.fillRect(0, 0, matCanvas.width, matCanvas.height);
@@ -1210,7 +1268,7 @@ async function generateLayoutHybridPDF(mode) {
           const img = new Image();
           img.onload = () => {
             matCtx.save();
-            matCtx.translate(borderPx + col * cellPx + cellPx/2, borderPx + row * cellPx + cellPx/2);
+            matCtx.translate(borderSidePx + col * cellPx + cellPx/2, borderTBPx + row * cellPx + cellPx/2);
             matCtx.rotate(cwDeg * Math.PI / 180);
             if (fl) matCtx.scale(-1, 1);
             matCtx.drawImage(img, -cellPx/2, -cellPx/2, cellPx, cellPx);
@@ -1218,7 +1276,7 @@ async function generateLayoutHybridPDF(mode) {
             if (tileBorderEnabled()) {
               matCtx.strokeStyle = '#ff0000';
               matCtx.lineWidth = 2;
-              matCtx.strokeRect(borderPx + col * cellPx, borderPx + row * cellPx, cellPx, cellPx);
+              matCtx.strokeRect(borderSidePx + col * cellPx, borderTBPx + row * cellPx, cellPx, cellPx);
             }
             resolve();
           };
@@ -1227,26 +1285,35 @@ async function generateLayoutHybridPDF(mode) {
         });
       }
       btn.textContent = 'Saving PNG\u2026';
-      await downloadPng(matCanvas, pdfName('292mm_full').replace('.pdf', '.png'));
+      const _oc_292mm = (cropEnabled() && _crop) ? (()=>{
+        const oc=document.createElement('canvas');
+        oc.width =cropCols*cellPx+borderSidePx*2;
+        oc.height=cropRows*cellPx+borderTBPx*2;
+        const ox=oc.getContext('2d');
+        ox.fillStyle='#ffffff';ox.fillRect(0,0,oc.width,oc.height);
+        ox.drawImage(matCanvas,cropMinCol*cellPx,cropMinRow*cellPx,cropCols*cellPx,cropRows*cellPx,borderSidePx,borderTBPx,cropCols*cellPx,cropRows*cellPx);
+        return oc;
+      })():matCanvas;
+      await downloadPng(_oc_292mm, pdfName('292mm_full').replace('.pdf', '.png'));
     } else if (mode==='left'||mode==='right') {
       const {PDFDocument:D2}=PDFLib;
       const hd=await D2.create(),sd=await D2.load(pdfBytes);
       const [emb]=await hd.embedPdf(sd,[0]);
       const RP=(parseFloat(document.getElementById('roll-w').value)||1143)*2.83465;
-      const hmw=PAGE_W/2, outW=RP, hp=hd.addPage([outW,PAGE_H + BORDER_PT * 2]);
-      if (mode==='left') { hp.drawPage(emb,{x:outW-hmw,y:BORDER_PT,width:PAGE_W,height:PAGE_H}); await downloadPdf(await hd.save(),pdfName('292mm_left')); }
-      else { hp.drawPage(emb,{x:-hmw,y:BORDER_PT,width:PAGE_W,height:PAGE_H}); await downloadPdf(await hd.save(),pdfName('292mm_right')); }
+      const hmw=PAGE_W/2, outW=RP, hp=hd.addPage([outW,PAGE_H + BORDER_TB_PT * 2]);
+      if (mode==='left') { hp.drawPage(emb,{x:outW-hmw,y:BORDER_TB_PT,width:PAGE_W,height:PAGE_H}); await downloadPdf(await hd.save(),pdfName('292mm_left')); }
+      else { hp.drawPage(emb,{x:-hmw,y:BORDER_TB_PT,width:PAGE_W,height:PAGE_H}); await downloadPdf(await hd.save(),pdfName('292mm_right')); }
     } else if (mode==='strips') {
       const {PDFDocument:D2}=PDFLib;
       const RP=(parseFloat(document.getElementById('roll-w').value)||1143)*2.83465;
-      const totalW=PAGE_W + BORDER_PT * 2;
+      const totalW=PAGE_W + BORDER_SIDE_PT * 2;
       const ns=Math.ceil(totalW/RP);
       for (let i=0;i<ns;i++) {
         btn.textContent=`Saving strip ${i+1} of ${ns}\u2026`;
         const sd2=await D2.create(),src2=await D2.load(pdfBytes);
         const [e2]=await sd2.embedPdf(src2,[0]);
-        const sp=sd2.addPage([RP,PAGE_H + BORDER_PT * 2]);
-        sp.drawPage(e2,{x:BORDER_PT-(i*RP),y:BORDER_PT,width:PAGE_W,height:PAGE_H});
+        const sp=sd2.addPage([RP,PAGE_H + BORDER_TB_PT * 2]);
+        sp.drawPage(e2,{x:BORDER_SIDE_PT-(i*RP),y:BORDER_TB_PT,width:PAGE_W,height:PAGE_H});
         await downloadPdf(await sd2.save(),pdfName(`292mm_strip${i+1}of${ns}`));
       }
     } else {
@@ -1258,8 +1325,8 @@ async function generateLayoutHybridPDF(mode) {
       const [emb]=await od.embedPdf(sd,[0]);
       for (let row=0;row<rows;row++) {
         for (let col=0;col<cols;col++) {
-          const pg=od.addPage([pgW + BORDER_PT * 2,pgH + BORDER_PT * 2]);
-          pg.drawPage(emb,{x:BORDER_PT-(col*pgW),y:BORDER_PT-(PAGE_H-pgH)+(row*pgH),width:PAGE_W,height:PAGE_H});
+          const pg=od.addPage([pgW + BORDER_SIDE_PT * 2,pgH + BORDER_TB_PT * 2]);
+          pg.drawPage(emb,{x:BORDER_SIDE_PT-(col*pgW),y:BORDER_TB_PT-(PAGE_H-pgH)+(row*pgH),width:PAGE_W,height:PAGE_H});
         }
       }
       const label=mode.toUpperCase();
@@ -1346,14 +1413,22 @@ async function generateLayout390PDF(mode) {
     const { PDFDocument } = PDFLib;
     const MM_TO_PT = 2.83465;
     const TILE_PT  = 390 * MM_TO_PT;
-    const BORDER_MM = getWhiteBorderMm();
-    const BORDER_PT = BORDER_MM * MM_TO_PT;
+    const BORDER_SIDE_MM = getWhiteBorderSideMm();
+    const BORDER_TB_MM   = getWhiteBorderTBMm();
+    const BORDER_SIDE_PT = BORDER_SIDE_MM * MM_TO_PT;
+    const BORDER_TB_PT   = BORDER_TB_MM   * MM_TO_PT;
     const COLS = 3, ROWS = 6;
     const PAGE_W = COLS * TILE_PT;
     const PAGE_H = ROWS * TILE_PT;
 
     const outDoc  = await PDFDocument.create();
     outDoc.setTitle('Line Follower 390mm Layout');
+    // ── Crop to content (output stage only) ──────────────────────────
+    const _crop = cropEnabled() ? computeCrop(state390, 3, 6) : null;
+    const cropMinCol = _crop ? _crop.minCol : 0;
+    const cropMinRow = _crop ? _crop.minRow : 0;
+    const cropCols   = _crop ? (_crop.maxCol - _crop.minCol + 1) : 3;
+    const cropRows   = _crop ? (_crop.maxRow - _crop.minRow + 1) : 6;
     const outPage = outDoc.addPage([PAGE_W, PAGE_H]);
 
     // Render a data-URI tile to a square canvas with CW rotation, return PNG bytes
@@ -1482,21 +1557,22 @@ async function generateLayout390PDF(mode) {
     const raw  = (document.getElementById('io-name').value.trim() || 'linefollower-layout').replace(/[^a-zA-Z0-9_-]/g, '_');
     if (mode === 'full') {
       const rPT390 = (parseFloat(document.getElementById('roll-w').value)||1143)*2.83465;
-      const outW = Math.max(rPT390, PAGE_W + BORDER_PT * 2);
-      const outH = PAGE_H + BORDER_PT * 2;
-      if (Math.abs(outW-PAGE_W)<2 && BORDER_PT===0) { await downloadPdf(pdfBytes, pdfName('390mm_3x6_full')); }
+      const outW = cropCols*TILE_PT + BORDER_SIDE_PT * 2;
+      const outH = cropRows*TILE_PT + BORDER_TB_PT * 2;
+      if (Math.abs(outW-PAGE_W)<2 && BORDER_SIDE_PT===0 && BORDER_TB_PT===0) { await downloadPdf(pdfBytes, pdfName('390mm_3x6_full')); }
       else {
         const {PDFDocument:D2}=PDFLib, fd=await D2.create(), sd=await D2.load(pdfBytes);
         const [ed]=await fd.embedPdf(sd,[0]), fp=fd.addPage([outW,outH]);
-        fp.drawPage(ed,{x:(outW-PAGE_W)/2,y:BORDER_PT,width:PAGE_W,height:PAGE_H});
+        fp.drawPage(ed,{x:BORDER_SIDE_PT-cropMinCol*TILE_PT,y:BORDER_TB_PT-(6-cropMinRow-cropRows)*TILE_PT,width:PAGE_W,height:PAGE_H});
         await downloadPdf(await fd.save(), pdfName('390mm_3x6_full'));
       }
     } else if (mode === 'png') {
       const matCanvas = document.createElement('canvas');
       const cellPx = 1092;
-      const borderPx = getBorderPx(BORDER_MM, cellPx, 390);
-      matCanvas.width  = COLS * cellPx + borderPx * 2;
-      matCanvas.height = ROWS * cellPx + borderPx * 2;
+      const borderSidePx = getBorderPx(BORDER_SIDE_MM, cellPx, 390);
+      const borderTBPx   = getBorderPx(BORDER_TB_MM,   cellPx, 390);
+      matCanvas.width  = COLS * cellPx + borderSidePx * 2;
+      matCanvas.height = ROWS * cellPx + borderTBPx   * 2;
       const matCtx = matCanvas.getContext('2d');
       matCtx.fillStyle = '#ffffff';
       matCtx.fillRect(0, 0, matCanvas.width, matCanvas.height);
@@ -1514,7 +1590,7 @@ async function generateLayout390PDF(mode) {
           const img = new Image();
           img.onload = () => {
             matCtx.save();
-            matCtx.translate(borderPx + col * cellPx + cellPx/2, borderPx + row * cellPx + cellPx/2);
+            matCtx.translate(borderSidePx + col * cellPx + cellPx/2, borderTBPx + row * cellPx + cellPx/2);
             matCtx.rotate(cwDeg * Math.PI / 180);
             if (fl) matCtx.scale(-1, 1);
             matCtx.drawImage(img, -cellPx/2, -cellPx/2, cellPx, cellPx);
@@ -1522,7 +1598,7 @@ async function generateLayout390PDF(mode) {
             if (tileBorderEnabled()) {
               matCtx.strokeStyle = '#ff0000';
               matCtx.lineWidth = 2;
-              matCtx.strokeRect(borderPx + col * cellPx, borderPx + row * cellPx, cellPx, cellPx);
+              matCtx.strokeRect(borderSidePx + col * cellPx, borderTBPx + row * cellPx, cellPx, cellPx);
             }
             resolve();
           };
@@ -1531,7 +1607,16 @@ async function generateLayout390PDF(mode) {
         });
       }
       btn.textContent = 'Saving PNG\u2026';
-      await downloadPng(matCanvas, pdfName('390mm_3x6_full').replace('.pdf', '.png'));
+      const _oc_390mm_3x6 = (cropEnabled() && _crop) ? (()=>{
+        const oc=document.createElement('canvas');
+        oc.width =cropCols*cellPx+borderSidePx*2;
+        oc.height=cropRows*cellPx+borderTBPx*2;
+        const ox=oc.getContext('2d');
+        ox.fillStyle='#ffffff';ox.fillRect(0,0,oc.width,oc.height);
+        ox.drawImage(matCanvas,cropMinCol*cellPx,cropMinRow*cellPx,cropCols*cellPx,cropRows*cellPx,borderSidePx,borderTBPx,cropCols*cellPx,cropRows*cellPx);
+        return oc;
+      })():matCanvas;
+      await downloadPng(_oc_390mm_3x6, pdfName('390mm_3x6_full').replace('.pdf', '.png'));
     } else if (mode === 'left' || mode === 'right') {
       const { PDFDocument: PDFDoc2 } = PDFLib;
       const halfDoc  = await PDFDoc2.create();
@@ -1540,27 +1625,27 @@ async function generateLayout390PDF(mode) {
       const ROLL_PT  = (parseFloat(document.getElementById('roll-w').value) || 1170) * 2.83465;
       const halfMatW = PAGE_W / 2;
       const outW = ROLL_PT;
-      const outH = PAGE_H + BORDER_PT * 2;
+      const outH = PAGE_H + BORDER_TB_PT * 2;
       const halfPage = halfDoc.addPage([outW, outH]);
       if (mode === 'left') {
-        halfPage.drawPage(emb, { x: outW - halfMatW, y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        halfPage.drawPage(emb, { x: outW - halfMatW, y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await halfDoc.save(), pdfName('390mm_3x6_left'));
       } else {
-        halfPage.drawPage(emb, { x: -halfMatW, y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        halfPage.drawPage(emb, { x: -halfMatW, y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await halfDoc.save(), pdfName('390mm_3x6_right'));
       }
     } else if (mode === 'strips') {
       const { PDFDocument: PDFDoc2 } = PDFLib;
       const ROLL_PT   = (parseFloat(document.getElementById('roll-w').value) || 1170) * 2.83465;
-      const totalW = PAGE_W + BORDER_PT * 2;
+      const totalW = PAGE_W + BORDER_SIDE_PT * 2;
       const numStrips = Math.ceil(totalW / ROLL_PT);
       for (let i = 0; i < numStrips; i++) {
         btn.textContent = `Saving strip ${i + 1} of ${numStrips}\u2026`;
         const stripDoc  = await PDFDoc2.create();
         const srcDoc2   = await PDFDoc2.load(pdfBytes);
         const [emb2]    = await stripDoc.embedPdf(srcDoc2, [0]);
-        const stripPage = stripDoc.addPage([ROLL_PT, PAGE_H + BORDER_PT * 2]);
-        stripPage.drawPage(emb2, { x: BORDER_PT - (i * ROLL_PT), y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        const stripPage = stripDoc.addPage([ROLL_PT, PAGE_H + BORDER_TB_PT * 2]);
+        stripPage.drawPage(emb2, { x: BORDER_SIDE_PT - (i * ROLL_PT), y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await stripDoc.save(), pdfName(`390mm_3x6_strip${i + 1}of${numStrips}`));
       }
     } else {
@@ -1576,11 +1661,11 @@ async function generateLayout390PDF(mode) {
       const [emb2]  = await outDoc2.embedPdf(srcDoc2, [0]);
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
-          const pg = outDoc2.addPage([pgW + BORDER_PT * 2, pgH + BORDER_PT * 2]);
+          const pg = outDoc2.addPage([pgW + BORDER_SIDE_PT * 2, pgH + BORDER_TB_PT * 2]);
           // shift mat so this page's window aligns to (col, row)
           pg.drawPage(emb2, {
-            x: BORDER_PT - (col * pgW),
-            y: BORDER_PT - (PAGE_H - pgH) + (row * pgH),
+            x: BORDER_SIDE_PT - (col * pgW),
+            y: BORDER_TB_PT - (PAGE_H - pgH) + (row * pgH),
             width: PAGE_W, height: PAGE_H,
           });
         }
@@ -1617,14 +1702,22 @@ async function generateLayout390bPDF(mode) {
     const { PDFDocument } = PDFLib;
     const MM_TO_PT = 2.83465;
     const TILE_PT  = 390 * MM_TO_PT;
-    const BORDER_MM = getWhiteBorderMm();
-    const BORDER_PT = BORDER_MM * MM_TO_PT;
+    const BORDER_SIDE_MM = getWhiteBorderSideMm();
+    const BORDER_TB_MM   = getWhiteBorderTBMm();
+    const BORDER_SIDE_PT = BORDER_SIDE_MM * MM_TO_PT;
+    const BORDER_TB_PT   = BORDER_TB_MM   * MM_TO_PT;
     const COLS = 4, ROWS = 4;
     const PAGE_W = COLS * TILE_PT;
     const PAGE_H = ROWS * TILE_PT;
 
     const outDoc  = await PDFDocument.create();
     outDoc.setTitle('Line Follower 390mm 4×4 Layout');
+    // ── Crop to content (output stage only) ──────────────────────────
+    const _crop = cropEnabled() ? computeCrop(state390b, 4, 4) : null;
+    const cropMinCol = _crop ? _crop.minCol : 0;
+    const cropMinRow = _crop ? _crop.minRow : 0;
+    const cropCols   = _crop ? (_crop.maxCol - _crop.minCol + 1) : 4;
+    const cropRows   = _crop ? (_crop.maxRow - _crop.minRow + 1) : 4;
     const outPage = outDoc.addPage([PAGE_W, PAGE_H]);
 
     async function tileToPNG(dataUri, cwDeg, fl) {
@@ -1719,22 +1812,23 @@ async function generateLayout390bPDF(mode) {
 
     if (mode === 'full') {
       const rollPt = (parseFloat(document.getElementById('roll-w').value) || 1560) * 2.83465;
-      const outW = Math.max(rollPt, PAGE_W + BORDER_PT * 2);
-      const outH = PAGE_H + BORDER_PT * 2;
-      if (Math.abs(outW - PAGE_W) < 2 && BORDER_PT === 0) {
+      const outW = cropCols*TILE_PT + BORDER_SIDE_PT * 2;
+      const outH = cropRows*TILE_PT + BORDER_TB_PT * 2;
+      if (Math.abs(outW - PAGE_W) < 2 && BORDER_SIDE_PT === 0 && BORDER_TB_PT === 0) {
         await downloadPdf(pdfBytes, pdfName('390mm_4x4_full'));
       } else {
         const {PDFDocument:D2}=PDFLib, fd=await D2.create(), sd=await D2.load(pdfBytes);
         const [ed]=await fd.embedPdf(sd,[0]), fp=fd.addPage([outW,outH]);
-        fp.drawPage(ed,{x:(outW-PAGE_W)/2,y:BORDER_PT,width:PAGE_W,height:PAGE_H});
+        fp.drawPage(ed,{x:BORDER_SIDE_PT-cropMinCol*TILE_PT,y:BORDER_TB_PT-(4-cropMinRow-cropRows)*TILE_PT,width:PAGE_W,height:PAGE_H});
         await downloadPdf(await fd.save(), pdfName('390mm_4x4_full'));
       }
     } else if (mode === 'png') {
       const matCanvas = document.createElement('canvas');
       const cellPx = 1092;
-      const borderPx = getBorderPx(BORDER_MM, cellPx, 390);
-      matCanvas.width = COLS * cellPx + borderPx * 2;
-      matCanvas.height = ROWS * cellPx + borderPx * 2;
+      const borderSidePx = getBorderPx(BORDER_SIDE_MM, cellPx, 390);
+      const borderTBPx   = getBorderPx(BORDER_TB_MM,   cellPx, 390);
+      matCanvas.width  = COLS * cellPx + borderSidePx * 2;
+      matCanvas.height = ROWS * cellPx + borderTBPx   * 2;
       const matCtx = matCanvas.getContext('2d');
       matCtx.fillStyle = '#ffffff';
       matCtx.fillRect(0, 0, matCanvas.width, matCanvas.height);
@@ -1752,7 +1846,7 @@ async function generateLayout390bPDF(mode) {
           const img = new Image();
           img.onload = () => {
             matCtx.save();
-            matCtx.translate(borderPx + col * cellPx + cellPx/2, borderPx + row * cellPx + cellPx/2);
+            matCtx.translate(borderSidePx + col * cellPx + cellPx/2, borderTBPx + row * cellPx + cellPx/2);
             matCtx.rotate(cwDeg * Math.PI / 180);
             if (fl) matCtx.scale(-1, 1);
             matCtx.drawImage(img, -cellPx/2, -cellPx/2, cellPx, cellPx);
@@ -1760,7 +1854,7 @@ async function generateLayout390bPDF(mode) {
             if (tileBorderEnabled()) {
               matCtx.strokeStyle = '#ff0000';
               matCtx.lineWidth = 2;
-              matCtx.strokeRect(borderPx + col * cellPx, borderPx + row * cellPx, cellPx, cellPx);
+              matCtx.strokeRect(borderSidePx + col * cellPx, borderTBPx + row * cellPx, cellPx, cellPx);
             }
             resolve();
           };
@@ -1768,7 +1862,16 @@ async function generateLayout390bPDF(mode) {
         });
       }
       btn.textContent = 'Saving PNG\u2026';
-      await downloadPng(matCanvas, pdfName('390mm_4x4_full').replace('.pdf', '.png'));
+      const _oc_390mm_4x4 = (cropEnabled() && _crop) ? (()=>{
+        const oc=document.createElement('canvas');
+        oc.width =cropCols*cellPx+borderSidePx*2;
+        oc.height=cropRows*cellPx+borderTBPx*2;
+        const ox=oc.getContext('2d');
+        ox.fillStyle='#ffffff';ox.fillRect(0,0,oc.width,oc.height);
+        ox.drawImage(matCanvas,cropMinCol*cellPx,cropMinRow*cellPx,cropCols*cellPx,cropRows*cellPx,borderSidePx,borderTBPx,cropCols*cellPx,cropRows*cellPx);
+        return oc;
+      })():matCanvas;
+      await downloadPng(_oc_390mm_4x4, pdfName('390mm_4x4_full').replace('.pdf', '.png'));
     } else if (mode === 'left' || mode === 'right') {
       const { PDFDocument: D2 } = PDFLib;
       const hd = await D2.create(), sd = await D2.load(pdfBytes);
@@ -1776,25 +1879,25 @@ async function generateLayout390bPDF(mode) {
       const rollPt = (parseFloat(document.getElementById('roll-w').value) || 1560) * 2.83465;
       const halfMatW = PAGE_W / 2;
       const outW = rollPt;
-      const hp = hd.addPage([outW, PAGE_H + BORDER_PT * 2]);
+      const hp = hd.addPage([outW, PAGE_H + BORDER_TB_PT * 2]);
       if (mode === 'left') {
-        hp.drawPage(emb, { x: outW - halfMatW, y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        hp.drawPage(emb, { x: outW - halfMatW, y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await hd.save(), pdfName('390mm_4x4_left'));
       } else {
-        hp.drawPage(emb, { x: -halfMatW, y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        hp.drawPage(emb, { x: -halfMatW, y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await hd.save(), pdfName('390mm_4x4_right'));
       }
     } else if (mode === 'strips') {
       const { PDFDocument: D2 } = PDFLib;
       const rollPt = (parseFloat(document.getElementById('roll-w').value) || 1560) * 2.83465;
-      const totalW = PAGE_W + BORDER_PT * 2;
+      const totalW = PAGE_W + BORDER_SIDE_PT * 2;
       const numStrips = Math.ceil(totalW / rollPt);
       for (let i = 0; i < numStrips; i++) {
         btn.textContent = `Saving strip ${i + 1} of ${numStrips}\u2026`;
         const sd2 = await D2.create(), src2 = await D2.load(pdfBytes);
         const [e2] = await sd2.embedPdf(src2, [0]);
-        const sp = sd2.addPage([rollPt, PAGE_H + BORDER_PT * 2]);
-        sp.drawPage(e2, { x: BORDER_PT - (i * rollPt), y: BORDER_PT, width: PAGE_W, height: PAGE_H });
+        const sp = sd2.addPage([rollPt, PAGE_H + BORDER_TB_PT * 2]);
+        sp.drawPage(e2, { x: BORDER_SIDE_PT - (i * rollPt), y: BORDER_TB_PT, width: PAGE_W, height: PAGE_H });
         await downloadPdf(await sd2.save(), pdfName(`390mm_4x4_strip${i + 1}of${numStrips}`));
       }
     } else {
@@ -1809,8 +1912,8 @@ async function generateLayout390bPDF(mode) {
       const [emb2]  = await outDoc2.embedPdf(srcDoc2, [0]);
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
-          const pg = outDoc2.addPage([pgW + BORDER_PT * 2, pgH + BORDER_PT * 2]);
-          pg.drawPage(emb2, { x: BORDER_PT - (col * pgW), y: BORDER_PT - (PAGE_H - pgH) + (row * pgH),
+          const pg = outDoc2.addPage([pgW + BORDER_SIDE_PT * 2, pgH + BORDER_TB_PT * 2]);
+          pg.drawPage(emb2, { x: BORDER_SIDE_PT - (col * pgW), y: BORDER_TB_PT - (PAGE_H - pgH) + (row * pgH),
                               width: PAGE_W, height: PAGE_H });
         }
       }
